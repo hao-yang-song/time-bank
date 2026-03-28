@@ -1,0 +1,18 @@
+/* ================= dark.css (暗黑模式颜色变量) ================= */
+
+/* 暗黑模式颜色变量 */
+:root {
+    --brut-bg: #0d0d0d;
+    --brut-black: #800020;
+    --brut-white: #2d2d2d;
+    --brut-red: #800020;
+    --brut-text: #d1d1ca;
+    --brut-accent: #ff473e;
+    --brut-border: 2px solid var(--brut-black);
+    --font-mono: 'Courier New', Courier, monospace;
+}
+
+/* Bootstrap 边框颜色暗黑模式兼容 */
+.border-bottom {
+    border-color: var(--brut-black) !important;
+}

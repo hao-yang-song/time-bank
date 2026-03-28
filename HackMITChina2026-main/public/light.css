@@ -1,0 +1,13 @@
+/* ================= light.css (亮色模式颜色变量) ================= */
+
+/* 亮色模式颜色变量 */
+:root {
+    --brut-bg: #f4f4f0;
+    --brut-black: #0a0a0a;
+    --brut-white: #ffffff;
+    --brut-red: #e62117;
+    --brut-text: #0a0a0a;
+    --brut-accent: #dc3545;
+    --brut-border: 2px solid var(--brut-black);
+    --font-mono: 'Courier New', Courier, monospace;
+}

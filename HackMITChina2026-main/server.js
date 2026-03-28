@@ -1,0 +1,713 @@
+// 1. 核心依赖导入与服务初始化：引入Express/MongoDB/CORS，创建服务实例、配置端口
+// 尝试加载dotenv，如果未安装则跳过
+try {
+    require('dotenv').config();
+} catch (e) {
+    console.log('⚠️ dotenv not installed, using environment variables or defaults');
+}
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+
+const app = express();
+const PORT = 3000; 
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static('public'));
+
+mongoose.connect('mongodb://127.0.0.1:27017/timebank')
+    .then(() => console.log('✅ 数据库连接成功！TimeBank 记忆中枢已上线！'))
+    .catch((err) => console.error('❌ 数据库连接失败：', err));
+
+// 2. 数据模型定义：创建用户、任务、任务记录三大核心数据表结构
+const UserSchema = new mongoose.Schema({
+    email: { type: String, required: true, unique: true }, 
+    password: { type: String, required: true },           
+    role: { type: String, required: true },               
+    school_id: { type: String, default: "demo_high_school" },
+    totalTime: { type: Number, default: 0 },
+    totalCoins: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now }
+});
+const User = mongoose.model('User', UserSchema);
+
+const TaskSchema = new mongoose.Schema({
+    title: String, desc: String, tag: String,
+    duration: Number, capacity: Number, publisherEmail: String,
+    startDate: { type: Date, required: true },
+    endDate: { type: Date, required: true }, 
+    dimensions: {
+        dim1: { type: Number, default: 0, min: 0, max: 5 }, 
+        dim2: { type: Number, default: 0, min: 0, max: 5 }, 
+        dim3: { type: Number, default: 0, min: 0, max: 5 }, 
+        dim4: { type: Number, default: 0, min: 0, max: 5 }, 
+        dim5: { type: Number, default: 0, min: 0, max: 5 }  
+    },
+    baseCoins: { type: Number, default: 0 },
+    status: { type: String, default: 'pending_audit' }, 
+    rejectReason: { type: String, default: "" },
+    createdAt: { type: Date, default: Date.now }
+});
+const Task = mongoose.model('Task', TaskSchema);
+
+const TaskRecordSchema = new mongoose.Schema({
+    taskId: { type: mongoose.Schema.Types.ObjectId, ref: 'Task', required: true }, 
+    studentEmail: { type: String, required: true }, 
+    status: { type: String, default: 'accepted' }, 
+    reflection: { type: String, default: "" }, 
+    gainedTime: { type: Number, default: 0 },       
+    gainedBaseCoins: { type: Number, default: 0 },  
+    gainedBonusCoins: { type: Number, default: 0 }, 
+    deductedTime: { type: Number, default: 0 },     
+    deductReason: { type: String, default: "" },    
+    createdAt: { type: Date, default: Date.now },
+    completedAt: { type: Date }
+});
+const TaskRecord = mongoose.model('TaskRecord', TaskRecordSchema);
+// --- 新增：志愿补录数据模型 ---
+const RetroEntrySchema = new mongoose.Schema({
+    studentEmail: { type: String, required: true },
+    eventName: { type: String, required: true },
+    hours: { type: Number, required: true },
+    evidence: { type: String, required: true },
+    status: { type: String, default: 'pending_audit' }, // 状态: pending_audit, approved, rejected
+    createdAt: { type: Date, default: Date.now },
+    auditedAt: { type: Date }
+});
+const RetroEntry = mongoose.model('RetroEntry', RetroEntrySchema);
+
+// 3. 基础身份接口：服务状态检测、用户注册、登录验证
+app.get('/api/status', (req, res) => {
+    res.json({ message: "🚀 Polaris 11319 后端引擎全速运转中！" });
+});
+
+app.post('/api/register', async (req, res) => {
+    try {
+        const { email, password, role } = req.body;
+        const existingUser = await User.findOne({ email: email });
+        if (existingUser) return res.status(400).json({ success: false, message: "这个邮箱已经被注册过啦！" });
+
+        const newUser = new User({ email, password, role });
+        await newUser.save();
+        res.json({ success: true, message: `注册成功！欢迎你，${role}` });
+    } catch (error) {
+        console.error("注册报错:", error);
+        res.status(500).json({ success: false, message: "服务器内部错误" });
+    }
+});
+
+app.post('/api/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        const user = await User.findOne({ email: email, password: password });
+        if (!user) return res.status(401).json({ success: false, message: "账号或密码错误！" });
+
+        res.json({ success: true, message: "登录成功", role: user.role });
+    } catch (error) {
+        console.error("登录报错:", error);
+        res.status(500).json({ success: false, message: "服务器内部错误" });
+    }
+});
+
+// 4. 学生个人数据接口：获取时长、心币、信誉分、活跃任务等个人信息
+app.get('/api/student/profile', async (req, res) => {
+    try {
+        const email = req.query.email;
+        if (!email) return res.status(400).json({ success: false, message: "缺少邮箱参数" });
+
+        const user = await User.findOne({ email: email });
+        if (!user) return res.status(404).json({ success: false, message: "用户不存在" });
+
+        const settledCount = await TaskRecord.countDocuments({ studentEmail: email, status: 'settled' });
+        const anomalyCount = await TaskRecord.countDocuments({ studentEmail: email, status: 'anomaly' });
+        
+        let reputationScore = 100 + (settledCount * 2) - (anomalyCount * 10);
+        
+        let reputationText = "良好";
+        let badgeColor = "bg-success";
+        if (reputationScore >= 110) {
+            reputationText = "极佳";
+            badgeColor = "bg-primary";
+        } else if (reputationScore < 90) {
+            reputationText = "危险";
+            badgeColor = "bg-danger";
+        }
+
+        const activeCount = await TaskRecord.countDocuments({ 
+            studentEmail: email, 
+            status: { $in: ['accepted', 'settling', 'pending_audit'] } 
+        });
+
+        res.json({
+            success: true,
+            data: {
+                totalTime: user.totalTime,
+                totalCoins: user.totalCoins,
+                reputationScore: reputationScore,
+                reputationText: reputationText,
+                badgeColor: badgeColor,
+                activeTasks: activeCount
+            }
+        });
+    } catch (error) {
+        console.error("拉取个人数据失败:", error);
+        res.status(500).json({ success: false, message: "获取数据失败" });
+    }
+});
+
+// 5. 任务管理接口：任务发布、列表查询、审核、教师个人任务管理
+app.post('/api/tasks', async (req, res) => {
+    try {
+        const { title, desc, duration, capacity, tag, publisherEmail, role, startDate, endDate, dims } = req.body;
+        
+        const d = dims || { dim1:0, dim2:0, dim3:0, dim4:0, dim5:0 };
+        const totalDimScore = (Number(d.dim1) + Number(d.dim2) + Number(d.dim3) + Number(d.dim4) + Number(d.dim5));
+        const autoBaseCoins = Math.floor((duration * 10) + (totalDimScore * 2));
+
+        const initialStatus = (role === 'admin') ? 'published' : 'pending_audit';
+
+        const newTask = new Task({
+            title, desc, duration, capacity, tag, publisherEmail, 
+            startDate, endDate, 
+            dimensions: d, 
+            baseCoins: autoBaseCoins,
+            status: initialStatus
+        });
+        await newTask.save();
+        
+        const msg = (role === 'admin') ? `官方任务已上架！自动测算保底心币为: ${autoBaseCoins} 枚` : `任务已提交审核！自动测算保底心币为: ${autoBaseCoins} 枚`;
+        res.json({ success: true, message: msg });
+    } catch (error) {
+        console.error("发布任务报错:", error);
+        res.status(500).json({ success: false, message: "服务器内部错误" });
+    }
+});
+
+app.get('/api/tasks', async (req, res) => {
+    try {
+        const tasks = await Task.find({ status: 'published' }).sort({ createdAt: -1 });
+        res.json({ success: true, data: tasks });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "服务器拉取任务失败" });
+    }
+});
+
+app.get('/api/admin/pending-tasks', async (req, res) => {
+    try {
+        const tasks = await Task.find({ status: 'pending_audit' }).sort({ createdAt: 1 });
+        res.json({ success: true, data: tasks });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "拉取待审核列表失败" });
+    }
+});
+
+app.post('/api/admin/audit-task', async (req, res) => {
+    try {
+        const { taskId, action, reason } = req.body; 
+        const task = await Task.findById(taskId);
+        if (!task) return res.status(404).json({ success: false, message: "任务不存在" });
+
+        if (action === 'approve') {
+            task.status = 'published'; 
+            task.rejectReason = "";
+        } else if (action === 'reject') {
+            task.status = 'rejected';  
+            task.rejectReason = reason || "不符合规范，请修改后重试";
+        }
+        await task.save();
+        res.json({ success: true, message: action === 'approve' ? "任务已通过并上架！" : "任务已驳回！" });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "审核处理失败" });
+    }
+});
+
+app.get('/api/teacher/my-tasks', async (req, res) => {
+    try {
+        const email = req.query.email;
+        if (!email) return res.status(400).json({ success: false, message: "缺少邮箱参数" });
+        const tasks = await Task.find({ publisherEmail: email }).sort({ createdAt: -1 });
+        res.json({ success: true, data: tasks });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "拉取任务进度失败" });
+    }
+});
+
+// 6. 任务流转接口：学生接取任务、查询个人任务、提交任务心得
+app.post('/api/tasks/accept', async (req, res) => {
+    try {
+        const { taskId, studentEmail } = req.body;
+        const task = await Task.findById(taskId);
+        if (!task) return res.status(404).json({ success: false, message: "任务不存在" });
+
+        const existingRecord = await TaskRecord.findOne({ taskId: taskId, studentEmail: studentEmail });
+        if (existingRecord) return res.status(400).json({ success: false, message: "不能重复接取哦！" });
+
+        const newRecord = new TaskRecord({ taskId, studentEmail, status: 'accepted' });
+        await newRecord.save();
+        res.json({ success: true, message: "接取成功！请按时完成！" });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "服务器内部错误" });
+    }
+});
+
+app.get('/api/tasks/my', async (req, res) => {
+    try {
+        const email = req.query.email; 
+        if (!email) return res.status(400).json({ success: false, message: "缺少参数" });
+        const myRecords = await TaskRecord.find({ studentEmail: email }).populate('taskId');
+        res.json({ success: true, data: myRecords });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "查询失败" });
+    }
+});
+
+app.post('/api/tasks/reflect', async (req, res) => {
+    try {
+        const { recordId, reflection } = req.body;
+        if (!reflection || reflection.trim().length < 5) {
+            return res.status(400).json({ success: false, message: "心得不能太敷衍，至少5个字哦！" });
+        }
+
+        const record = await TaskRecord.findById(recordId).populate('taskId');
+        if (!record || record.status !== 'settling') {
+            return res.status(400).json({ success: false, message: "当前状态无法提交心得" });
+        }
+        
+        const now = new Date();
+        if (now - record.completedAt > 259200000) {
+            return res.status(400).json({ success: false, message: "已经超过了 3 天的心得提交期限哦，无法再获取额外奖励了。" });
+        }
+
+        record.reflection = reflection;
+        record.status = 'pending_audit'; 
+        await record.save();
+
+        res.json({ success: true, message: "心得已提交！等待老师审核后发放附加奖励。" });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "提交失败" });
+    }
+});
+
+// 7. 教师管理接口：核减工时、发放心得奖金、标记任务异常
+app.post('/api/teacher/deduct-time', async (req, res) => {
+    try {
+        const { recordId, deductHours, reason } = req.body;
+        const record = await TaskRecord.findById(recordId);
+        
+        const now = new Date();
+        if (now - record.completedAt > 259200000) {
+            return res.status(400).json({ success: false, message: "已超过 3 天追诉期，无法再修改学生工时！" });
+        }
+        if (!reason) return res.status(400).json({ success: false, message: "扣除工时必须给出理由！" });
+
+        record.deductedTime += deductHours;
+        record.gainedTime -= deductHours;
+        record.deductReason = reason;
+        await record.save();
+
+        await User.findOneAndUpdate({ email: record.studentEmail }, { $inc: { totalTime: -deductHours } });
+        res.json({ success: true, message: `已成功核减该学生 ${deductHours} 小时工时。` });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "操作失败" });
+    }
+});
+
+app.post('/api/teacher/award-bonus', async (req, res) => {
+    try {
+        const { recordId, bonusAmount } = req.body;
+        const record = await TaskRecord.findById(recordId).populate('taskId');
+        
+        const now = new Date();
+        if (now - record.completedAt > 604800000) {
+            return res.status(400).json({ success: false, message: "已超过 7 天评审期，无法再发放额外奖励！" });
+        }
+
+        const maxBonus = record.taskId.baseCoins; 
+        if (bonusAmount > maxBonus) {
+            return res.status(400).json({ success: false, message: `额外奖励不能超过上限 ${maxBonus} 枚哦！` });
+        }
+
+        record.gainedBonusCoins = bonusAmount;
+        record.status = 'settled'; 
+        await record.save();
+
+        await User.findOneAndUpdate({ email: record.studentEmail }, { $inc: { totalCoins: bonusAmount } });
+        res.json({ success: true, message: `批阅完成！已为该心得发放 ${bonusAmount} 枚附加心币。` });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "操作失败" });
+    }
+});
+
+app.post('/api/teacher/mark-anomaly', async (req, res) => {
+    try {
+        const { recordId, reason } = req.body;
+        const record = await TaskRecord.findById(recordId);
+        if (!record) return res.status(404).json({ success: false, message: "记录不存在" });
+
+        record.status = 'anomaly'; 
+        await record.save();
+        res.json({ success: true, message: "已标记为异常，停止一切自动结算流转！" });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "操作失败" });
+    }
+});
+
+// 8. 定时结算引擎：任务到期自动下发时长和保底心币
+setInterval(async () => {
+    try {
+        const now = new Date();
+        const expiredTasks = await Task.find({ status: 'published', endDate: { $lte: now } });
+
+        for (let task of expiredTasks) {
+            task.status = 'settling'; 
+            await task.save();
+
+            const records = await TaskRecord.find({ taskId: task._id, status: 'accepted' });
+            for (let record of records) {
+                record.status = 'settling';
+                record.completedAt = now;
+                record.gainedTime = task.duration;    
+                record.gainedBaseCoins = task.baseCoins; 
+                await record.save();
+
+                await User.findOneAndUpdate(
+                    { email: record.studentEmail }, 
+                    { $inc: { totalTime: task.duration, totalCoins: task.baseCoins } }
+                );
+            }
+            console.log(`[时间引擎] ⏰ 任务 "${task.title}" 结束，已自动下发 ${task.duration}h 时长与 ${task.baseCoins} 枚保底心币！`);
+        }
+    } catch (error) {
+        console.error("时间引擎报错:", error);
+    }
+}, 60000); 
+
+// 9. 教师数据查询接口：查询自己发布任务下的所有学生记录
+app.get('/api/teacher/student-records', async (req, res) => {
+    try {
+        const email = req.query.email;
+        if (!email) return res.status(400).json({ success: false, message: "缺少邮箱参数" });
+
+        const myTasks = await Task.find({ publisherEmail: email });
+        const taskIds = myTasks.map(t => t._id);
+
+        const records = await TaskRecord.find({ taskId: { $in: taskIds } })
+                                        .populate('taskId')
+                                        .sort({ createdAt: -1 });
+        
+        res.json({ success: true, data: records });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "拉取学生记录失败" });
+    }
+});
+
+// ================= 新增模块：志愿补录与全局数据管理 =================
+
+// 1. 学生提交志愿补录申请
+app.post('/api/student/retro-entry', async (req, res) => {
+    try {
+        const { studentEmail, eventName, hours, evidence } = req.body;
+        if (!studentEmail || !eventName || !hours || !evidence) {
+            return res.status(400).json({ success: false, message: "参数不完整" });
+        }
+        
+        const newEntry = new RetroEntry({ studentEmail, eventName, hours, evidence });
+        await newEntry.save();
+        res.json({ success: true, message: "补录申请已提交" });
+    } catch (error) {
+        console.error("提交补录报错:", error);
+        res.status(500).json({ success: false, message: "服务器内部错误" });
+    }
+});
+
+// 2. 管理员拉取待审核的补录列表
+app.get('/api/admin/retro-entries', async (req, res) => {
+    try {
+        const entries = await RetroEntry.find({ status: 'pending_audit' }).sort({ createdAt: 1 });
+        res.json({ success: true, data: entries });
+    } catch (error) {
+        res.status(500).json({ success: false, message: "拉取补录列表失败" });
+    }
+});
+
+// 3. 管理员审批志愿补录
+app.post('/api/admin/audit-retro', async (req, res) => {
+    try {
+        const { entryId, action } = req.body;
+        const entry = await RetroEntry.findById(entryId);
+        if (!entry) return res.status(404).json({ success: false, message: "补录记录不存在" });
+
+        if (action === 'approve') {
+            entry.status = 'approved';
+            entry.auditedAt = new Date();
+            await entry.save();
+            
+            // 审批通过，自动给学生增加工时
+            await User.findOneAndUpdate(
+                { email: entry.studentEmail },
+                { $inc: { totalTime: entry.hours } }
+            );
+            res.json({ success: true, message: `已批准！${entry.hours} 小时已入账。` });
+        } else if (action === 'reject') {
+            entry.status = 'rejected';
+            entry.auditedAt = new Date();
+            await entry.save();
+            res.json({ success: true, message: "已驳回该补录申请。" });
+        } else {
+            res.status(400).json({ success: false, message: "未知操作" });
+        }
+    } catch (error) {
+        res.status(500).json({ success: false, message: "审核处理失败" });
+    }
+});
+
+// 4. 管理员拉取全校学生数据总览
+app.get('/api/admin/all-students', async (req, res) => {
+    try {
+        // 查找所有角色为 student 的用户
+        const students = await User.find({ role: 'student' });
+        
+        // 并行计算每个学生的信誉分和活跃任务数
+        const result = await Promise.all(students.map(async (student) => {
+            const activeCount = await TaskRecord.countDocuments({ 
+                studentEmail: student.email, 
+                status: { $in: ['accepted', 'settling', 'pending_audit'] } 
+            });
+            const settledCount = await TaskRecord.countDocuments({ studentEmail: student.email, status: 'settled' });
+            const anomalyCount = await TaskRecord.countDocuments({ studentEmail: student.email, status: 'anomaly' });
+            
+            let reputationScore = 100 + (settledCount * 2) - (anomalyCount * 10);
+            
+            return {
+                email: student.email,
+                totalTime: student.totalTime,
+                totalCoins: student.totalCoins,
+                reputationScore: reputationScore,
+                activeTasks: activeCount
+            };
+        }));
+        
+        res.json({ success: true, data: result });
+    } catch (error) {
+        console.error("拉取学生数据失败:", error);
+        res.status(500).json({ success: false, message: "拉取全校学生数据失败" });
+    }
+});
+
+// 11. AI聊天API路由
+app.post('/api/chat', async (req, res) => {
+    try {
+        const { message } = req.body;
+        if (!message) {
+            return res.status(400).json({ success: false, message: "消息不能为空" });
+        }
+
+        const aiProvider = process.env.AI_PROVIDER || 'mock';
+        let aiResponse = '';
+
+        // 根据配置的AI提供商调用相应的服务
+        switch (aiProvider) {
+            case 'openai':
+                aiResponse = await callOpenAI(message);
+                break;
+            case 'dashscope':
+                aiResponse = await callDashScope(message);
+                break;
+            case 'deepseek':
+                aiResponse = await callDeepSeek(message);
+                break;
+            case 'moonshot':
+                aiResponse = await callMoonshot(message);
+                break;
+            case 'zhipu':
+                aiResponse = await callZhipu(message);
+                break;
+            case 'mock':
+            default:
+                // 模拟AI回复
+                aiResponse = getMockResponse(message);
+                break;
+        }
+
+        res.json({ success: true, response: aiResponse });
+
+    } catch (error) {
+        console.error("AI聊天API错误:", error);
+        res.status(500).json({ success: false, message: "AI服务暂时不可用: " + error.message });
+    }
+});
+
+// 模拟AI回复函数
+function getMockResponse(message) {
+    const lowerMsg = message.toLowerCase();
+    
+    if (lowerMsg.includes('help') || lowerMsg.includes('帮助')) {
+        return "I'm here to help! What do you need assistance with? 我可以帮你了解任务系统、工时查询、金币获取等信息。";
+    } else if (lowerMsg.includes('task') || lowerMsg.includes('任务') || lowerMsg.includes('job')) {
+        return "You can find available tasks in the Task Hub section. Click on '任务大厅 [HUB]' in the sidebar. 在那里你可以浏览和接取可用的志愿任务。";
+    } else if (lowerMsg.includes('hours') || lowerMsg.includes('time') || lowerMsg.includes('时长') || lowerMsg.includes('时间')) {
+        return "You can check your total hours in the '我的数据 [DATA]' section. 你的志愿时长会在完成任务后自动累计。";
+    } else if (lowerMsg.includes('coins') || lowerMsg.includes('points') || lowerMsg.includes('金币') || lowerMsg.includes('心币')) {
+        return "Your coins are displayed in the top navigation bar. They can be earned by completing tasks. 每完成一个任务，你都会获得相应的心币奖励。";
+    } else if (lowerMsg.includes('profile') || lowerMsg.includes('account') || lowerMsg.includes('账户') || lowerMsg.includes('个人')) {
+        return "Your user ID is displayed at the bottom of the sidebar. 你可以在侧边栏底部查看你的账户信息。";
+    } else if (lowerMsg.includes('hello') || lowerMsg.includes('hi') || lowerMsg.includes('你好')) {
+        return "Hello! I'm your AI assistant for the TimeBank system. How can I help you today? 你好！我是时间银行系统的AI助手，有什么可以帮你的吗？";
+    }
+    
+    return "I'm sorry, I don't have enough information to answer that. Can you provide more details?";
+}
+
+// OpenAI API调用
+async function callOpenAI(message) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+        throw new Error('OpenAI API Key not configured');
+    }
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+            model: 'gpt-3.5-turbo',
+            messages: [
+                { role: 'system', content: 'You are a helpful assistant for the TimeBank volunteer system. Answer questions about tasks, hours, coins, and user accounts in a friendly manner. You can respond in both English and Chinese.' },
+                { role: 'user', content: message }
+            ],
+            max_tokens: 500
+        })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(data.error?.message || 'OpenAI API error');
+    }
+    return data.choices[0].message.content;
+}
+
+// 阿里云通义千问 API调用
+async function callDashScope(message) {
+    const apiKey = process.env.DASHSCOPE_API_KEY;
+    if (!apiKey) {
+        throw new Error('DashScope API Key not configured');
+    }
+
+    const response = await fetch('https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+            model: 'qwen-turbo',
+            input: {
+                messages: [
+                    { role: 'system', content: '你是时间银行志愿系统的AI助手，帮助用户解答关于任务、工时、金币和账户的问题。' },
+                    { role: 'user', content: message }
+                ]
+            }
+        })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(data.message || 'DashScope API error');
+    }
+    return data.output.text;
+}
+
+// DeepSeek API调用 (Reasoner模式)
+async function callDeepSeek(message) {
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+        throw new Error('DeepSeek API Key not configured');
+    }
+
+    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+            model: 'deepseek-llm',
+            messages: [
+                { role: 'system', content: 'You are a reasoning assistant for the TimeBank volunteer system. Use logical reasoning to answer questions about tasks, hours, coins, and user accounts. Provide detailed and thoughtful responses.' },
+                { role: 'user', content: message }
+            ]
+        })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(data.error?.message || 'DeepSeek API error');
+    }
+    return data.choices[0].message.content;
+}
+
+// Moonshot AI API调用
+async function callMoonshot(message) {
+    const apiKey = process.env.MOONSHOT_API_KEY;
+    if (!apiKey) {
+        throw new Error('Moonshot API Key not configured');
+    }
+
+    const response = await fetch('https://api.moonshot.cn/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+            model: 'moonshot-v1-8k',
+            messages: [
+                { role: 'system', content: '你是时间银行志愿系统的AI助手，帮助用户解答关于任务、工时、金币和账户的问题。' },
+                { role: 'user', content: message }
+            ]
+        })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(data.error?.message || 'Moonshot API error');
+    }
+    return data.choices[0].message.content;
+}
+
+// 智谱AI API调用
+async function callZhipu(message) {
+    const apiKey = process.env.ZHIPU_API_KEY;
+    if (!apiKey) {
+        throw new Error('Zhipu API Key not configured');
+    }
+
+    const response = await fetch('https://open.bigmodel.cn/api/paas/v4/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+            model: 'glm-4',
+            messages: [
+                { role: 'system', content: '你是时间银行志愿系统的AI助手，帮助用户解答关于任务、工时、金币和账户的问题。' },
+                { role: 'user', content: message }
+            ]
+        })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(data.error?.message || 'Zhipu API error');
+    }
+    return data.choices[0].message.content;
+}
+
+// 12. 服务启动：监听端口，启动后端服务
+app.listen(PORT, () => {
+    console.log(`✅ 服务器启动完毕！正在监听 ${PORT} 端口...`);
+});
